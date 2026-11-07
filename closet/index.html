@@ -142,6 +142,14 @@ dialog::backdrop{background:rgba(20,10,22,.55)}
 .photo-pick .row{flex-direction:column;align-items:flex-start;gap:.45rem}
 .tint{width:66%;aspect-ratio:1;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08)}
 .thumb .tint{width:100%;border-radius:0}
+.combo-list{display:flex;flex-direction:column;gap:.8rem}
+.combo{background:var(--surface);border-radius:16px;box-shadow:var(--shadow);padding:.85rem}
+.combo .thumb{width:64px;height:64px;flex-basis:64px;font-size:1.6rem}
+.combo-names{font-size:.8rem;color:var(--muted);margin-top:.5rem;line-height:1.4}
+.combo-foot{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-top:.2rem;flex-wrap:wrap}
+.stars{color:#e8a33d;font-size:.95rem;letter-spacing:.05em}
+.iconbtn{border:1px solid var(--border);background:var(--surface);border-radius:99px;padding:.45rem .85rem;font-size:.82rem}
+.iconbtn[aria-pressed="true"]{background:var(--rose);color:var(--on-rose);border-color:var(--rose)}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
 </style>
 </head>
@@ -182,6 +190,23 @@ dialog::backdrop{background:rgba(20,10,22,.55)}
     </div>
   </section>
 
+  <!-- COMBINACIONES -->
+  <section class="view" id="v-combos">
+    <h2>Todas mis combinaciones</h2>
+    <p class="hint">Todos los outfits que combinan bien con tu ropa, del mejor al peor. Guarda tus favoritos con ♡.</p>
+    <div class="label">Ocasión</div>
+    <div class="chips" id="c-occ"></div>
+    <div class="label">Clima</div>
+    <div class="chips" id="c-wx"></div>
+    <div class="toolbar">
+      <label class="sr" for="c-filter">Filtrar combinaciones</label>
+      <select id="c-filter"></select>
+    </div>
+    <p class="hint" id="c-summary"></p>
+    <div class="combo-list" id="c-list"></div>
+    <div style="text-align:center;margin-top:1.2rem"><button class="btn ghost" id="c-more" hidden>Ver más</button></div>
+  </section>
+
   <!-- CLOSET -->
   <section class="view" id="v-closet">
     <h2>Mi ropa</h2>
@@ -214,6 +239,7 @@ dialog::backdrop{background:rgba(20,10,22,.55)}
 
 <nav>
   <button class="on" data-v="hoy"><span>✨</span>Hoy</button>
+  <button data-v="combos"><span>🧩</span>Combos</button>
   <button data-v="closet"><span>👗</span>Closet</button>
   <button data-v="hist"><span>📅</span>Historial</button>
 </nav>
@@ -392,7 +418,9 @@ function nearestColor(hex){
   const lab = rgbToLab(...hexToRgb(hex));
   return SOLID.reduce((a,c) => dE(lab,c.lab) < dE(lab,a.lab) ? c : a).id;
 }
-function colorInfo(it){
+const ciMemo = new WeakMap();
+function colorInfo(it){ let r = ciMemo.get(it); if (!r){ r = colorInfoRaw(it); ciMemo.set(it, r); } return r; }
+function colorInfoRaw(it){
   const named = byId(COLORS, it.color) || byId(COLORS, 'gris');
   if (named.print) return { id:'estampado', name:'estampado', print:true };
   const hex = it.hex || named.hex;
@@ -451,9 +479,9 @@ async function analyzePhoto(src){
 
 /* ---------- Almacenamiento ---------- */
 const KEY = 'micloset.v1';
-let db = { items: [], history: [] };
+let db = { items: [], history: [], saved: [] };
 function load(){
-  try { const raw = localStorage.getItem(KEY); if (raw) db = Object.assign({items:[],history:[]}, JSON.parse(raw)); } catch(e){}
+  try { const raw = localStorage.getItem(KEY); if (raw) db = Object.assign({items:[],history:[],saved:[]}, JSON.parse(raw)); } catch(e){}
 }
 function save(){
   try { localStorage.setItem(KEY, JSON.stringify(db)); renderTrends(); return true; }
@@ -500,6 +528,7 @@ function go(v){
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
   document.querySelectorAll('.view').forEach(s => s.classList.toggle('on', s.id === 'v-' + v));
   if (v === 'closet') renderCloset();
+  if (v === 'combos') renderCombos(true);
   if (v === 'hist') renderHist();
   window.scrollTo(0, 0);
 }
@@ -585,13 +614,15 @@ function trendMatch(t, o, harmony){
   if (t.onlyLight && entries.some(e => !['shoes','acc'].includes(e.k) && e.c.l < .55)) return false;
   return true;
 }
-function scoreOutfit(o, occ, wx){
+function scoreOutfit(o, occ, wx, { noise = true, recency = true, forced = true } = {}){
   const pieces = Object.values(o).filter(Boolean);
   const cs = colorScore(o);
   let s = cs.s;
   for (const p of pieces){
-    const d = lastWornDays(p.id);
-    if (d < 2) s -= 4; else if (d < 5) s -= 2; else if (d === Infinity) s += .5;
+    if (recency){
+      const d = lastWornDays(p.id);
+      if (d < 2) s -= 4; else if (d < 5) s -= 2; else if (d === Infinity) s += .5;
+    }
     if (p.fav) s += 1;
     if (wx === 'frio') s += (p.warm - 2) * .8;
     if (wx === 'calor') s -= (p.warm - 1) * .8;
@@ -599,8 +630,8 @@ function scoreOutfit(o, occ, wx){
   if (o.outer && wx === 'templado') s += .3;
   const trends = TRENDS.filter(t => trendMatch(t, o, cs.harmony));
   if (trends.length) s += STYLE_W[state.style] * (1 + (trends.length - 1) * .3);
-  if (state.trend && trends.some(t => t.id === state.trend)) s += 15;
-  return { s: s + Math.random() * 1.5, notes:cs.notes, harmony:cs.harmony, trends };
+  if (forced && state.trend && trends.some(t => t.id === state.trend)) s += 15;
+  return { s: s + (noise ? Math.random() * 1.5 : 0), color:cs.s, notes:cs.notes, harmony:cs.harmony, trends };
 }
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 function candidates(occ, wx){
@@ -668,9 +699,9 @@ function run(){
 }
 $('#gen').onclick = () => { state.trend = null; renderTrends(); run(); };
 const colorList = groups => groups.map(g => g.map(id => byId(COLORS, id).name.toLowerCase()).join(' o ')).join(', ');
-function trendMissing(t){
+function trendMissing(t, occ = state.occ){
   if (t.mono) return 'Necesitas al menos dos prendas de un mismo color para esta ocasión.';
-  const have = id => db.items.some(it => (it.occ || []).includes(state.occ) && colorInfo(it).id === id);
+  const have = id => db.items.some(it => (it.occ || []).includes(occ) && colorInfo(it).id === id);
   const miss = t.need.filter(g => !g.some(have));
   return miss.length ? `Te falta una prenda en ${colorList(miss)}.` : 'Prueba con otra ocasión o clima.';
 }
@@ -716,16 +747,143 @@ function renderOutfit(){
     <div class="why">${tags ? `<div>${tags}</div>` : ''}${notes}${warn}</div>
     <div class="row">
       <button class="btn" onclick="wear()">👍 Me lo pongo</button>
+      <button class="btn ghost" onclick="saveToday(this)">${isSaved(outfitKey(o)) ? '❤️ Guardada' : '♡ Guardar'}</button>
       <button class="btn ghost" onclick="run()">↻ Otra idea</button>
     </div></div>`;
 }
-function wear(){
-  const ids = Object.values(state.outfit).filter(Boolean).map(p => p.id);
-  db.history.unshift({ id: uid(), date: Date.now(), occ: state.occ, wx: state.wx, items: ids });
+function wear(){ wearIds(Object.values(state.outfit).filter(Boolean).map(p => p.id), state.occ, state.wx); }
+function saveToday(btn){
+  const on = toggleSave(state.outfit, state.occ, state.wx);
+  btn.textContent = on ? '❤️ Guardada' : '♡ Guardar';
+}
+const outfitKey = o => Object.values(o).filter(Boolean).map(p => p.id).sort().join('|');
+const isSaved = key => db.saved.some(x => x.key === key);
+function toggleSave(o, occ, wx){
+  const key = outfitKey(o);
+  if (isSaved(key)){ db.saved = db.saved.filter(x => x.key !== key); save(); toast('Quitada de tus guardadas'); return false; }
+  db.saved.unshift({ key, items: Object.values(o).filter(Boolean).map(p => p.id), occ, wx, date: Date.now() });
+  save(); toast('Combinación guardada ❤️'); return true;
+}
+function wearIds(ids, occ, wx){
+  db.history.unshift({ id: uid(), date: Date.now(), occ, wx, items: ids });
   db.history = db.history.slice(0, 200);
   save();
   toast('¡Lista! Guardado en tu historial ✨');
 }
+
+/* ---------- Todas las combinaciones ---------- */
+const QUALITY = { noise:false, recency:false, forced:false };
+const combos = { occ:'casual', wx:'templado', filter:'', shown:20, list:[], current:[] };
+chipGroup($('#c-occ'), OCCS, { get:() => combos.occ, set:v => { combos.occ = v; renderCombos(true); } });
+chipGroup($('#c-wx'), WX, { get:() => combos.wx, set:v => { combos.wx = v; renderCombos(true); } });
+$('#c-filter').innerHTML = `<option value="">Todas las combinaciones</option><option value="saved">❤️ Mis guardadas</option>` +
+  TRENDS.map(t => `<option value="${t.id}">🔥 ${t.name}</option>`).join('');
+$('#c-filter').onchange = e => { combos.filter = e.target.value; combos.shown = 20; drawCombos(); };
+$('#c-more').onclick = () => { combos.shown += 20; drawCombos(); };
+function computeCombos(){
+  const { occ, wx } = combos, c = candidates(occ, wx);
+  const ev = o => { const r = scoreOutfit(o, occ, wx, QUALITY); return { o, q:r.s, ...r }; };
+  let bases = [];
+  for (const t of c.top) for (const b of c.bottom) bases.push({ top:t, bottom:b });
+  for (const d of c.dress) bases.push({ dress:d });
+  if (bases.length > 1500) bases = bases.sort(() => Math.random() - .5).slice(0, 1500);
+  // De cada grupo de variantes guarda la mejor, y además las que activan una tendencia nueva.
+  const pickVariants = cands => {
+    cands.sort((a,b) => b.q - a.q);
+    const out = [cands[0]], covered = new Set(cands[0].trends.map(t => t.id));
+    for (const r of cands.slice(1)){
+      const nw = r.trends.filter(t => !covered.has(t.id));
+      if (nw.length && r.color >= 1){ out.push(r); nw.forEach(t => covered.add(t.id)); }
+    }
+    return out;
+  };
+  const out = [];
+  for (const base of bases){
+    let stage;
+    if (c.shoes.length){
+      const sc = c.shoes.map(sh => ev({ ...base, shoes:sh })).sort((a,b) => b.q - a.q);
+      stage = [...new Set([...sc.slice(0, 2), ...pickVariants(sc)])];
+    } else stage = [ev({ ...base })];
+    if (c.outer.length && wx !== 'calor')
+      stage = stage.flatMap(r => pickVariants([...(needOuter(wx) ? [] : [r]), ...c.outer.map(ou => ev({ ...r.o, outer:ou }))]));
+    if (c.acc.length)
+      stage = stage.flatMap(r => pickVariants([r, ...c.acc.map(a => ev({ ...r.o, acc:a }))]));
+    for (const r of stage) if (r.color >= 1) out.push(r);
+  }
+  const seen = new Set();
+  combos.list = out.sort((a,b) => b.q - a.q).filter(r => { const k = outfitKey(r.o); if (seen.has(k)) return false; seen.add(k); return true; });
+}
+function renderCombos(recompute){
+  combos.shown = 20;
+  if (!recompute){ drawCombos(); return; }
+  $('#c-list').innerHTML = '<div class="empty">Calculando combinaciones…</div>';
+  $('#c-more').hidden = true;
+  setTimeout(() => { computeCombos(); drawCombos(); }, 30);
+}
+function filteredCombos(){
+  if (combos.filter === 'saved'){
+    return db.saved.map(sv => {
+      const its = sv.items.map(id => db.items.find(x => x.id === id));
+      if (!its.length || its.some(x => !x)) return null;
+      const o = {}; its.forEach(it => o[it.cat] = it);
+      const r = scoreOutfit(o, sv.occ, sv.wx, QUALITY);
+      return { o, q:r.s, ...r, occ:sv.occ, wx:sv.wx };
+    }).filter(Boolean);
+  }
+  return combos.filter ? combos.list.filter(r => r.trends.some(t => t.id === combos.filter)) : combos.list;
+}
+function comboHTML(r){
+  const pieces = SLOT_ORDER.filter(k => r.o[k]).map(k => r.o[k]);
+  const stars = Math.max(1, Math.min(5, Math.round(r.q / 2)));
+  const tags = [r.harmony && `🎨 ${r.harmony}`, ...r.trends.map(t => `🔥 ${t.name}`)].filter(Boolean).map(x => `<span class="tag-h">${x}</span>`).join('');
+  const key = outfitKey(r.o), sv = isSaved(key);
+  const ctx = r.occ ? `<span class="tag-h">${byId(OCCS, r.occ).icon} ${byId(OCCS, r.occ).name}</span>` : '';
+  return `<div class="combo" data-key="${key}">
+    <div class="thumbs">${pieces.map(it => `<div class="thumb" title="${esc(it.name)}">${phHTML(it)}</div>`).join('')}</div>
+    <div class="combo-names">${pieces.map(it => esc(it.name)).join(' · ')}</div>
+    <div style="margin-top:.55rem">${ctx}${tags}</div>
+    <div class="combo-foot">
+      <span class="stars" aria-label="${stars} de 5 estrellas">${'★'.repeat(stars)}${'☆'.repeat(5 - stars)}</span>
+      <div class="row">
+        <button class="iconbtn" data-act="save" aria-pressed="${sv}">${sv ? '❤️ Guardada' : '♡ Guardar'}</button>
+        <button class="iconbtn" data-act="wear">👍 Me lo pongo</button>
+      </div>
+    </div></div>`;
+}
+function drawCombos(){
+  if (!db.items.length){
+    $('#c-summary').textContent = '';
+    $('#c-list').innerHTML = `<div class="empty"><span class="big">🧩</span>Agrega tu ropa al closet y aquí verás todas tus combinaciones.<div class="row" style="justify-content:center;margin-top:1rem"><button class="btn small" onclick="go('closet');openForm()">+ Agregar prenda</button><button class="btn ghost small" onclick="loadSample();renderCombos(true)">Probar con ejemplo</button></div></div>`;
+    $('#c-more').hidden = true; return;
+  }
+  const list = filteredCombos(); combos.current = list;
+  const occN = byId(OCCS, combos.occ).name.toLowerCase(), wxN = byId(WX, combos.wx).name.toLowerCase();
+  const n = list.length;
+  $('#c-summary').innerHTML = combos.filter === 'saved'
+    ? `<b>${n}</b> ${n === 1 ? 'combinación guardada' : 'combinaciones guardadas'}.`
+    : `<b>${n}</b> ${n === 1 ? 'combinación que combina' : 'combinaciones que combinan'} bien para <b>${occN}</b> con clima <b>${wxN}</b>${combos.filter ? ` en la tendencia <b>${byId(TRENDS, combos.filter).name}</b>` : ''}.`;
+  if (!n){
+    const msg = combos.filter === 'saved' ? 'Aún no guardas combinaciones. Toca ♡ en las que te gusten.'
+      : combos.filter ? trendMissing(byId(TRENDS, combos.filter), combos.occ)
+      : 'No encontré combinaciones. Agrega más prendas para esta ocasión o prueba con otro clima.';
+    $('#c-list').innerHTML = `<div class="empty"><span class="big">🧩</span>${msg}</div>`;
+    $('#c-more').hidden = true; return;
+  }
+  $('#c-list').innerHTML = list.slice(0, combos.shown).map(comboHTML).join('');
+  $('#c-more').hidden = combos.shown >= n;
+  $('#c-more').textContent = `Ver más (${n - combos.shown} restantes)`;
+}
+$('#c-list').onclick = e => {
+  const b = e.target.closest('[data-act]'); if (!b) return;
+  const key = b.closest('.combo').dataset.key;
+  const r = combos.current.find(x => outfitKey(x.o) === key); if (!r) return;
+  const occ = r.occ || combos.occ, wx = r.wx || combos.wx;
+  if (b.dataset.act === 'save'){
+    const on = toggleSave(r.o, occ, wx);
+    if (combos.filter === 'saved') drawCombos();
+    else { b.setAttribute('aria-pressed', on); b.textContent = on ? '❤️ Guardada' : '♡ Guardar'; }
+  } else wearIds(Object.values(r.o).filter(Boolean).map(p => p.id), occ, wx);
+};
 
 /* ---------- Render: Closet ---------- */
 const filterEl = $('#filter');
@@ -874,7 +1032,7 @@ $('#import-file').onchange = async e => {
     const data = JSON.parse(await f.text());
     if (!Array.isArray(data.items)) throw 0;
     if (!confirm(`Esto reemplazará tu closet actual con ${data.items.length} prendas. ¿Continuar?`)) return;
-    db = { items: data.items, history: Array.isArray(data.history) ? data.history : [] };
+    db = { items: data.items, history: Array.isArray(data.history) ? data.history : [], saved: Array.isArray(data.saved) ? data.saved : [] };
     save(); renderHist(); toast('Copia restaurada');
   } catch(err){ toast('Ese archivo no es una copia válida'); }
 };
