@@ -273,6 +273,11 @@ dialog::backdrop{background:rgba(20,10,22,.55)}
       <div class="chips" id="f-cat"></div>
     </div>
 
+    <div class="field" id="f-sub-wrap" hidden>
+      <span class="lbl">¿De qué tipo?</span>
+      <div class="chips" id="f-sub"></div>
+    </div>
+
     <div class="field">
       <span class="lbl">Color</span>
       <div class="detected" id="f-detected" hidden></div>
@@ -315,7 +320,16 @@ const CATS = [
   {id:'outer',    name:'Abrigo / chaqueta', icon:'🧥'},
   {id:'shoes',    name:'Zapatos',         icon:'👟'},
   {id:'acc',      name:'Accesorio',       icon:'👜'},
+  {id:'socks',    name:'Medias / calcetines', icon:'🧦'},
 ];
+// Subtipos: permiten reglas de estilo más finas (botas con frío, medias con falda, etc.)
+const SUBS = {
+  bottom: [{id:'pantalon',name:'Pantalón'},{id:'jean',name:'Jean'},{id:'falda',name:'Falda'},{id:'short',name:'Short',icon:'🩳'},{id:'leggings',name:'Leggings'}],
+  shoes:  [{id:'tenis',name:'Tenis',icon:'👟'},{id:'planos',name:'Planos / mocasines',icon:'🥿'},{id:'tacones',name:'Tacones',icon:'👠'},{id:'botas',name:'Botas / botines',icon:'👢'},{id:'sandalias',name:'Sandalias',icon:'👡'}],
+  acc:    [{id:'bolso',name:'Bolso',icon:'👜'},{id:'cinturon',name:'Cinturón',icon:'🪢'},{id:'joyeria',name:'Joyería',icon:'💍'},{id:'bufanda',name:'Bufanda',icon:'🧣'},{id:'gorro',name:'Gorro / sombrero',icon:'👒'},{id:'gafas',name:'Gafas de sol',icon:'🕶️'},{id:'reloj',name:'Reloj',icon:'⌚'}],
+  socks:  [{id:'tobilleras',name:'Tobilleras / deportivas'},{id:'calcetines',name:'Calcetines'},{id:'veladas',name:'Pantimedias / veladas'},{id:'gruesas',name:'Medias gruesas / térmicas'}],
+};
+const subOf = it => (SUBS[it.cat] || []).find(x => x.id === it.sub);
 const OCCS = [
   {id:'casual',  name:'Casual',     icon:'☕'},
   {id:'trabajo', name:'Trabajo / U',icon:'💼'},
@@ -360,6 +374,8 @@ const COLORS = [
   {id:'teal',    name:'Teal / petróleo', hex:'#1f7a78', hue:178},
   {id:'fucsia',  name:'Fucsia',     hex:'#d6337f', hue:330},
   {id:'lila',    name:'Lila',       hex:'#c3a6d8', hue:278},
+  {id:'dorado',  name:'Dorado',     hex:'#c9a34a', neutral:true},
+  {id:'plateado',name:'Plateado',   hex:'#c3c4cc', neutral:true},
   {id:'estampado',name:'Estampado', hex:'conic-gradient(#e8638f 0 25%,#3dbfb8 0 50%,#f2cf45 0 75%,#7b4fa8 0)', print:true},
 ];
 const byId = (arr, id) => arr.find(x => x.id === id);
@@ -500,7 +516,7 @@ function phHTML(it){
   if (it.photo) return `<img src="${it.photo}" alt="">`;
   const col = byId(COLORS, it.color);
   const bg = !col ? 'transparent' : col.print ? col.hex : (it.hex || col.hex);
-  return `<span class="tint" style="background:${bg}">${byId(CATS, it.cat).icon}</span>`;
+  return `<span class="tint" style="background:${bg}">${subOf(it)?.icon || byId(CATS, it.cat).icon}</span>`;
 }
 function chipGroup(el, list, {multi=false, get, set}){
   el.innerHTML = list.map(o => `<button type="button" class="chip" data-id="${o.id}">${o.icon ? o.icon + ' ' : ''}${o.name}</button>`).join('');
@@ -541,11 +557,64 @@ function lastWornDays(id){
   return Infinity;
 }
 function warmthOk(it, wx){
-  // Con calor descartamos lo muy abrigado; con frío todo sirve pero se puntúa.
-  if (wx === 'calor') return it.cat === 'outer' ? it.warm === 1 : it.warm < 3 || it.cat === 'acc';
+  // Con calor descartamos lo muy abrigado; con frío o lluvia, lo que deja el pie o la pierna al aire.
+  if (wx === 'calor'){
+    if (it.cat === 'outer' ? it.warm !== 1 : it.warm >= 3) return false;
+    if (['bufanda','gorro'].includes(it.sub) && it.warm >= 2) return false;
+    if (it.sub === 'gruesas') return false;
+  }
+  if (wx === 'frio' || wx === 'lluvia'){
+    if (['sandalias','short'].includes(it.sub)) return false;
+    if (wx === 'lluvia' && it.sub === 'gafas') return false;
+  }
   return true;
 }
-const AREA = { outer:3, top:3, bottom:3, dress:5, shoes:1, acc:1 };
+const legsShow = o => !!o.dress || ['falda','short'].includes(o.bottom?.sub);
+// ¿Estas medias van con estos zapatos y esta ropa?
+function socksFit(sk, o){
+  const sh = o.shoes?.sub;
+  if (sh === 'sandalias') return false;
+  if (['veladas','gruesas'].includes(sk.sub)) return legsShow(o) && sh !== 'tenis';
+  if (['tobilleras','calcetines'].includes(sk.sub)) return sh !== 'tacones';
+  return true;
+}
+const accOk = (a, other) => !other || (a.id !== other.id && (!a.sub || a.sub !== other.sub));
+// Reglas de estilo para zapatos, medias y accesorios.
+function styleScore(o, occ, wx){
+  let s = 0; const notes = [];
+  const sh = o.shoes, sk = o.socks, accs = [o.acc, o.acc2].filter(Boolean);
+  const sameColor = (a, b) => a && b && colorInfo(a).id === colorInfo(b).id;
+  if (sh){
+    if ((wx === 'frio' || wx === 'lluvia') && sh.sub === 'botas'){ s += 1; notes.push(wx === 'lluvia' ? 'botas para la lluvia' : 'botas para el frío'); }
+    if (wx === 'calor' && sh.sub === 'botas') s -= 1.5;
+    if (wx === 'calor' && sh.sub === 'sandalias') s += .5;
+    if (occ === 'formal' && sh.sub === 'tenis') s -= 3;
+    if (occ === 'deporte' && sh.sub && sh.sub !== 'tenis') s -= 3;
+    if (occ === 'fiesta' && sh.sub === 'tacones') s += .4;
+    if (occ === 'casual' && sh.sub === 'tenis' && legsShow(o)){ s += .4; notes.push(o.bottom?.sub === 'short' ? 'short con tenis: fresco y cómodo' : 'falda o vestido con tenis: cómodo y muy actual'); }
+  }
+  if (legsShow(o) && wx === 'frio'){
+    if (sk && ['veladas','gruesas'].includes(sk.sub)){ s += sk.sub === 'gruesas' ? 1.8 : 1.2; notes.push('medias para llevar falda o vestido sin pasar frío'); }
+    else s -= 1.5;
+  }
+  if (sk){
+    if (['veladas','gruesas'].includes(sk.sub) && sh && sameColor(sk, sh)){ s += .6; notes.push('medias del mismo tono que los zapatos: alargan la pierna'); }
+    if (['tobilleras','calcetines'].includes(sk.sub) && ['tenis','botas','planos'].includes(sh?.sub)) s += .3;
+    if (occ === 'formal' && sk.sub === 'tobilleras') s -= 1;
+    if (wx === 'calor' && sk.sub !== 'tobilleras') s -= 1;
+  }
+  for (const a of accs){
+    if (['bolso','cinturon'].includes(a.sub) && sameColor(a, sh) && !colorInfo(a).print){ s += .8; notes.push(`zapatos y ${subOf(a).name.toLowerCase()} del mismo color: un detalle clásico que une el look`); }
+    if (a.sub === 'gafas') s += wx === 'calor' ? .4 : wx === 'frio' ? -1 : 0;
+    if (a.sub === 'gafas' && ['fiesta','formal','trabajo'].includes(occ)) s -= 1;
+    if (['bufanda','gorro'].includes(a.sub) && wx === 'frio'){ s += .6; notes.push(`${subOf(a).name.toLowerCase().split(' / ')[0]} para abrigarte con estilo`); }
+    if (occ === 'casa') s -= .6;
+    if (occ === 'deporte' && ['bolso','joyeria','cinturon'].includes(a.sub)) s -= 1.5;
+  }
+  if (accs.length === 2 && accs.every(a => !colorInfo(a).neutral && !colorInfo(a).print) && !sameColor(accs[0], accs[1])) s -= .8;
+  return { s, notes };
+}
+const AREA = { outer:3, top:3, bottom:3, dress:5, shoes:1, acc:1, acc2:1 };
 function isSplit(hs){
   for (let i = 0; i < 3; i++){
     const opp = (hs[i] + 180) % 360, o = hs.filter((_,j) => j !== i);
@@ -555,7 +624,7 @@ function isSplit(hs){
 }
 // Teoría del color: armonías del círculo cromático, regla 60-30-10 y contraste de luz.
 function colorScore(o){
-  const entries = Object.entries(o).filter(([,p]) => p).map(([k,p]) => ({ k, c:colorInfo(p), a:AREA[k] }));
+  const entries = Object.entries(o).filter(([,p]) => p).map(([k,p]) => ({ k, c:colorInfo(p), a: k === 'socks' ? (legsShow(o) ? 1.5 : .3) : AREA[k] }));
   let s = 0, harmony = null; const notes = [];
   const prints = entries.filter(e => e.c.print);
   if (prints.length > 1) return { s:-8, notes:['dos estampados compiten entre sí'], harmony:null };
@@ -610,8 +679,8 @@ function trendMatch(t, o, harmony){
   const ids = entries.map(e => e.c.id), needed = t.need.flat();
   if (!t.need.every(g => g.some(id => ids.includes(id)))) return false;
   if (entries.some(e => !e.c.neutral && !needed.includes(e.c.id) && !t.allow.includes(e.c.id))) return false;
-  if (t.accentOnly && entries.some(e => needed.includes(e.c.id) && !['shoes','acc','top'].includes(e.k))) return false;
-  if (t.onlyLight && entries.some(e => !['shoes','acc'].includes(e.k) && e.c.l < .55)) return false;
+  if (t.accentOnly && entries.some(e => needed.includes(e.c.id) && !['shoes','acc','acc2','socks','top'].includes(e.k))) return false;
+  if (t.onlyLight && entries.some(e => !['shoes','acc','acc2','socks'].includes(e.k) && e.c.l < .55)) return false;
   return true;
 }
 function scoreOutfit(o, occ, wx, { noise = true, recency = true, forced = true } = {}){
@@ -628,16 +697,18 @@ function scoreOutfit(o, occ, wx, { noise = true, recency = true, forced = true }
     if (wx === 'calor') s -= (p.warm - 1) * .8;
   }
   if (o.outer && wx === 'templado') s += .3;
+  const st = styleScore(o, occ, wx);
+  s += st.s;
   const trends = TRENDS.filter(t => trendMatch(t, o, cs.harmony));
   if (trends.length) s += STYLE_W[state.style] * (1 + (trends.length - 1) * .3);
   if (forced && state.trend && trends.some(t => t.id === state.trend)) s += 15;
-  return { s: s + (noise ? Math.random() * 1.5 : 0), color:cs.s, notes:cs.notes, harmony:cs.harmony, trends };
+  return { s: s + (noise ? Math.random() * 1.5 : 0), color:cs.s, notes:[...cs.notes.slice(0, 2), ...st.notes.slice(0, 2), ...cs.notes.slice(2)], harmony:cs.harmony, trends };
 }
 const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 function candidates(occ, wx){
   const ok = it => (it.occ || []).includes(occ) && warmthOk(it, wx);
   const by = c => db.items.filter(it => it.cat === c && ok(it));
-  return { top:by('top'), bottom:by('bottom'), dress:by('dress'), outer:by('outer'), shoes:by('shoes'), acc:by('acc') };
+  return { top:by('top'), bottom:by('bottom'), dress:by('dress'), outer:by('outer'), shoes:by('shoes'), acc:by('acc'), socks:by('socks') };
 }
 function needOuter(wx){ return wx === 'frio' || wx === 'lluvia'; }
 function generate(){
@@ -651,7 +722,13 @@ function generate(){
     const o = useDress ? { dress: pick(c.dress) } : { top: pick(c.top), bottom: pick(c.bottom) };
     if (c.outer.length && (needOuter(wx) || (wx === 'templado' && Math.random() < .4))) o.outer = pick(c.outer);
     if (c.shoes.length) o.shoes = pick(c.shoes);
-    if (c.acc.length && Math.random() < .6) o.acc = pick(c.acc);
+    const sk = c.socks.filter(x => socksFit(x, o));
+    if (sk.length && Math.random() < .6) o.socks = pick(sk);
+    if (c.acc.length && Math.random() < .7){
+      o.acc = pick(c.acc);
+      const rest = c.acc.filter(a => accOk(a, o.acc));
+      if (rest.length && Math.random() < .5) o.acc2 = pick(rest);
+    }
     const sc = scoreOutfit(o, occ, wx);
     if (!best || sc.s > best.s) best = { o, ...sc };
   }
@@ -673,9 +750,13 @@ function missingMsg(c){
   return `Para <b>${occ}</b> con este clima me falta ${miss.join(' y ')} (o un vestido). Agrega prendas y marca esa ocasión.`;
 }
 function reroll(slot){
-  const c = candidates(state.occ, state.wx)[slot];
-  if (!c || c.length < 2){ toast('No tienes otra opción para esa prenda'); return; }
+  const o0 = state.outfit;
+  let c = candidates(state.occ, state.wx)[slot === 'acc2' ? 'acc' : slot] || [];
+  if (slot === 'socks') c = c.filter(x => socksFit(x, o0));
+  if (slot === 'acc') c = c.filter(a => accOk(a, o0.acc2));
+  if (slot === 'acc2') c = c.filter(a => accOk(a, o0.acc));
   const cur = state.outfit[slot];
+  if (!c.some(x => x.id !== cur.id)){ toast('No tienes otra opción para esa prenda'); return; }
   let best = null;
   for (const alt of c){
     if (alt.id === cur.id) continue;
@@ -683,7 +764,8 @@ function reroll(slot){
     if (!best || sc.s > best.s) best = { alt, ...sc };
   }
   state.outfit[slot] = best.alt;
-  state.res = best;
+  if (state.outfit.socks && !socksFit(state.outfit.socks, state.outfit)) delete state.outfit.socks;
+  state.res = scoreOutfit(state.outfit, state.occ, state.wx);
   renderOutfit();
 }
 
@@ -722,7 +804,7 @@ $('#trends').onclick = e => {
   renderTrends();
   if (state.trend){ run(); $('#result').scrollIntoView({ behavior:'smooth', block:'start' }); }
 };
-const SLOT_ORDER = ['outer','top','dress','bottom','shoes','acc'];
+const SLOT_ORDER = ['outer','top','dress','bottom','socks','shoes','acc','acc2'];
 function renderError(msg){
   if (msg === 'empty'){
     $('#result').innerHTML = `<div class="outfit empty"><span class="big">👗</span>Tu closet está vacío. Agrega tu ropa para empezar,<br>o carga un closet de ejemplo para probar.<div class="row" style="justify-content:center;margin-top:1rem"><button class="btn small" onclick="go('closet');openForm()">+ Agregar prenda</button><button class="btn ghost small" onclick="loadSample()">Probar con ejemplo</button></div></div>`;
@@ -740,7 +822,7 @@ function renderOutfit(){
   }).join('');
   const r = state.res || {};
   const tags = [r.harmony && `🎨 ${r.harmony}`, ...(r.trends || []).map(t => `🔥 ${t.name}`)].filter(Boolean).map(x => `<span class="tag-h">${x}</span>`).join('');
-  const notes = r.notes && r.notes.length ? `<b>Por qué funciona:</b> ${r.notes.slice(0, 3).join('; ')}.` : '';
+  const notes = r.notes && r.notes.length ? `<b>Por qué funciona:</b> ${r.notes.slice(0, 4).join('; ')}.` : '';
   const warn = state.warn && state.warn.length ? `<br>💡 Ojo: ${state.warn.join('; ')}.` : '';
   $('#result').innerHTML = `<div class="outfit">
     <div class="outfit-grid">${pieces}</div>
@@ -806,8 +888,15 @@ function computeCombos(){
     } else stage = [ev({ ...base })];
     if (c.outer.length && wx !== 'calor')
       stage = stage.flatMap(r => pickVariants([...(needOuter(wx) ? [] : [r]), ...c.outer.map(ou => ev({ ...r.o, outer:ou }))]));
-    if (c.acc.length)
+    if (c.socks.length)
+      stage = stage.flatMap(r => { const sk = c.socks.filter(x => socksFit(x, r.o)); return sk.length ? pickVariants([r, ...sk.map(x => ev({ ...r.o, socks:x }))]) : [r]; });
+    if (c.acc.length){
       stage = stage.flatMap(r => pickVariants([r, ...c.acc.map(a => ev({ ...r.o, acc:a }))]));
+      stage = stage.flatMap(r => {
+        const rest = r.o.acc ? c.acc.filter(a => accOk(a, r.o.acc)) : [];
+        return rest.length ? [pickVariants([r, ...rest.map(a => ev({ ...r.o, acc2:a }))])[0]] : [r];
+      });
+    }
     for (const r of stage) if (r.color >= 1) out.push(r);
   }
   const seen = new Set();
@@ -825,7 +914,7 @@ function filteredCombos(){
     return db.saved.map(sv => {
       const its = sv.items.map(id => db.items.find(x => x.id === id));
       if (!its.length || its.some(x => !x)) return null;
-      const o = {}; its.forEach(it => o[it.cat] = it);
+      const o = {}; its.forEach(it => o[it.cat === 'acc' && o.acc ? 'acc2' : it.cat] = it);
       const r = scoreOutfit(o, sv.occ, sv.wx, QUALITY);
       return { o, q:r.s, ...r, occ:sv.occ, wx:sv.wx };
     }).filter(Boolean);
@@ -901,14 +990,23 @@ function renderCloset(){
     const col = byId(COLORS, it.color);
     return `<button class="item" onclick="openForm('${it.id}')">
       <div class="ph">${phHTML(it)}${col ? `<span class="dot" style="background:${col.print ? col.hex : (it.hex || col.hex)}"></span>` : ''}${it.fav ? '<span class="fav">❤️</span>' : ''}</div>
-      <div class="meta"><strong>${esc(it.name)}</strong><small>${(it.occ || []).map(o => byId(OCCS, o).icon).join(' ')}</small></div></button>`;
+      <div class="meta"><strong>${esc(it.name)}</strong><small>${subOf(it) ? subOf(it).name + ' · ' : ''}${(it.occ || []).map(o => byId(OCCS, o).icon).join(' ')}</small></div></button>`;
   }).join('') || `<div class="empty" style="grid-column:1/-1">Nada en esta categoría.</div>`;
 }
 
 /* ---------- Formulario ---------- */
 const dlg = $('#dlg');
-let draft = { cat:'top', occ:[], warm:2, color:null, photo:null };
-const refreshCat  = chipGroup($('#f-cat'),  CATS, { get:() => draft.cat,  set:v => draft.cat = v });
+let draft = { cat:'top', sub:null, occ:[], warm:2, color:null, photo:null };
+const refreshCat  = chipGroup($('#f-cat'),  CATS, { get:() => draft.cat,  set:v => {
+  draft.cat = v;
+  if (!(SUBS[v] || []).some(x => x.id === draft.sub)) draft.sub = null;
+  renderSub();
+} });
+function renderSub(){
+  const list = SUBS[draft.cat];
+  $('#f-sub-wrap').hidden = !list;
+  if (list) chipGroup($('#f-sub'), list, { get:() => draft.sub, set:v => draft.sub = draft.sub === v ? null : v });
+}
 const refreshOcc  = chipGroup($('#f-occ'),  OCCS, { multi:true, get:() => draft.occ, set:v => draft.occ = v });
 const refreshWarm = chipGroup($('#f-warm'), WARM, { get:() => draft.warm, set:v => draft.warm = v });
 $('#f-color').innerHTML = COLORS.map(c => `<button type="button" class="sw" data-id="${c.id}" style="background:${c.hex}" aria-label="${c.name}" title="${c.name}"></button>`).join('');
@@ -966,13 +1064,13 @@ function shrink(file, max){
 }
 function openForm(id){
   const it = id && db.items.find(x => x.id === id);
-  draft = it ? JSON.parse(JSON.stringify(it)) : { id:null, name:'', cat:'top', color:null, occ:[state.occ], warm:2, fav:false, photo:null, hex:null };
+  draft = it ? JSON.parse(JSON.stringify(it)) : { id:null, name:'', cat:'top', color:null, sub:null, occ:[state.occ], warm:2, fav:false, photo:null, hex:null };
   $('#dlg-title').textContent = it ? 'Editar prenda' : 'Nueva prenda';
   $('#f-name').value = draft.name;
   $('#del').hidden = !it;
   $('#f-fav').setAttribute('aria-pressed', !!draft.fav);
   detected = []; renderDetected();
-  refreshCat(); refreshOcc(); refreshWarm(); refreshColor(); refreshPhoto();
+  refreshCat(); renderSub(); refreshOcc(); refreshWarm(); refreshColor(); refreshPhoto();
   dlg.showModal();
   if (draft.photo) analyzePhoto(draft.photo).then(d => { detected = d; renderDetected(); refreshColor(); }).catch(() => {});
 }
@@ -1069,7 +1167,23 @@ function loadSample(){
     S('Camisa teal','top','teal',['trabajo','casual','fiesta'],1),
     S('Botas chocolate','shoes','chocolate',['casual','trabajo','fiesta','formal'],3),
     S('Pantalón crema','bottom','beige',['trabajo','casual','formal'],2),
+    S('Short de jean','bottom','denim',['casual','casa'],1),
+    S('Mocasines negros','shoes','negro',['trabajo','casual','formal'],2),
+    S('Cinturón café','acc','cafe',['casual','trabajo','formal'],1),
+    S('Aretes dorados','acc','dorado',['casual','trabajo','fiesta','formal'],1),
+    S('Gafas de sol','acc','negro',['casual','fiesta'],1),
+    S('Medias veladas negras','socks','negro',['trabajo','fiesta','formal','casual'],1),
+    S('Medias gruesas negras','socks','negro',['casual','trabajo','fiesta'],3),
+    S('Calcetines blancos','socks','blanco',['casual','deporte','casa','trabajo'],1),
   ];
+  const SUB = {
+    'Jean clásico':'jean', 'Pantalón negro de vestir':'pantalon', 'Falda beige midi':'falda', 'Leggings deportivos':'leggings',
+    'Pantalón terracota':'pantalon', 'Pantalón crema':'pantalon', 'Short de jean':'short',
+    'Tenis blancos':'tenis', 'Botines café':'botas', 'Tacones negros':'tacones', 'Sandalias beige':'sandalias', 'Botas chocolate':'botas', 'Mocasines negros':'planos',
+    'Bolso vinotinto':'bolso', 'Bufanda gris':'bufanda', 'Bolso fucsia':'bolso', 'Cinturón café':'cinturon', 'Aretes dorados':'joyeria', 'Gafas de sol':'gafas',
+    'Medias veladas negras':'veladas', 'Medias gruesas negras':'gruesas', 'Calcetines blancos':'tobilleras',
+  };
+  db.items.forEach(it => it.sub = SUB[it.name] || null);
   save(); toast('Closet de ejemplo cargado'); renderCloset();
   if ($('#v-hoy').classList.contains('on')) $('#gen').click();
 }
